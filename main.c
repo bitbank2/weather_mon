@@ -32,12 +32,20 @@
 static int bRunning;
 static int T, P, H, CO2, VOC;
 static FILE *pf;
+static char szLogName[256];
+static int iPeriod, iSamples;
 
 void RecordValues(void)
 {
-char szTemp[256];
+char szTemp[256], szTime[256];
+time_t t;
+struct tm lt;
 
-	sprintf(szTemp, "%2.1f, %2.1f, %4.1f, %d\n", (float)T/100.0, (float)H/1024.0, (float)P/256.0, VOC);
+	t = time(NULL);
+	lt = *localtime(&t);
+
+	sprintf(szTime, "%d-%d-%d %d:%d:%d", lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec);
+	sprintf(szTemp, "%2.1f, %2.1f, %4.1f, %d, %s\n", (float)T/100.0, (float)H/1024.0, (float)P/256.0, VOC, szTime);
 	fwrite(szTemp, 1, strlen(szTemp), pf);
 } /* RecordValues() */
 
@@ -68,23 +76,98 @@ char szTemp[32];
 
 void *MonitorThread(void *pArg)
 {
-	while (bRunning)
+int iSample = 0;
+
+	while (bRunning && iSample < iSamples)
 	{
 		bme280ReadValues(&T, &P, &H);
-		T -= 150; // for some reason, the sensor reports temperatures too high
+		T -= 250; // for some reason, the sensor reports temperatures too high
 		ccs811ReadValues(&CO2, &VOC);
 		UpdateOLED();
 		RecordValues();
-		usleep(10000000); // sleep 10 seconds
+		usleep(iPeriod * 1000000); // sleep N seconds
+		iSample++;
+	}
+        oledShutdown();
+        FlushValues();
+	if (iSample == iSamples)
+	{
+		printf("Collection complete\n");
+		exit(0); // quit here
 	}
 return NULL;
 } /* MonitorThread() */
+//
+// Parse the command  line options
+//
+static int ParseOpts(int argc, char *argv[])
+{
+    int i = 1;
+
+// Set default values
+   iPeriod = 10; // 10 seconds
+   iSamples = 0x7fffffff; // 'infinite' samples
+   strcpy(szLogName, "weather.csv");
+
+    while (i < argc)
+    {
+        /* if it isn't a cmdline option, we're done */
+        if (0 != strncmp("--", argv[i], 2))
+            break;
+        /* GNU-style separator to support files with -- prefix
+         * example for a file named "--baz": ./foo --bar -- --baz
+         */
+        if (0 == strcmp("--", argv[i]))
+        {   
+            i += 1;
+            break;
+        }
+        /* test for each specific flag */
+        if (0 == strcmp("--period", argv[i])) {
+            iPeriod = atoi(argv[i+1]);
+            i += 2;
+        } else if (0 == strcmp("--samples", argv[i])) {
+            iSamples = atoi(argv[i+1]);
+            i += 2;
+        } else if (0 == strcmp("--name", argv[i])) {
+            strcpy(szLogName, argv[i+1]);
+            i += 2;
+        }  else {
+            fprintf(stderr, "Unknown parameter '%s'\n", argv[i]);
+            exit(1);
+        }  
+    }      
+    return i;
+
+} /* ParseOpts() */
+
+static void ShowHelp(void)
+{
+    printf(
+        "weather_mon: capture envionmental data\n"
+        "Copyright (c) 2017 BitBank Software, Inc.\n"
+        "Written by Larry Bank\n\n"
+        "Options:\n"
+        " --period  <integer>      capture period in seconds, defaults to 10\n"
+        " --name    <filename>     defaults to weather.csv\n"
+        " --samples <integer>      number of samples to capture, defaults to infinite\n"
+        "\nExample usage:\n"
+        "sudo ./wm --period 60 --samples 3600\n"
+    );
+} /* ShowHelp() */
 
 int main(int argc, char *argv[])
 {
 int i;
 pthread_t tinfo;
 int iI2C_Channel = 0; // check your hardware if this should be 0 or 1
+
+	if (argc < 2)
+	{
+		ShowHelp();
+		return 0;
+	}
+	ParseOpts(argc, argv); // get user options
 
 	i = bme280Init(iI2C_Channel, 0x76);
 	if (i != 0)
@@ -105,7 +188,7 @@ int iI2C_Channel = 0; // check your hardware if this should be 0 or 1
 	oledSetContrast(85); // set it to a lower brightness to not burn it
 
 	printf("Sensor devices successfully opened, beginning capture...\n");
-	pf = fopen("weather.csv","w");
+	pf = fopen(szLogName,"w");
 
 	bRunning = 1;
 	pthread_create(&tinfo, NULL, MonitorThread, NULL);
@@ -113,7 +196,5 @@ int iI2C_Channel = 0; // check your hardware if this should be 0 or 1
 
 	getchar(); // wait for user to press enter
 	bRunning = 0;
-	oledShutdown();
-	FlushValues();
 return 0;
 } /* main() */
